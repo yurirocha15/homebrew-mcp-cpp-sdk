@@ -1,0 +1,476 @@
+name: publish-bottles
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_tag:
+        required: true
+        type: string
+      source_commit_sha:
+        required: true
+        type: string
+      github_release_id:
+        required: true
+        type: string
+      source_workflow_run_id:
+        required: true
+        type: string
+      release_manifest_sha256:
+        required: true
+        type: string
+      formula_pr_number:
+        required: true
+        type: string
+      formula_branch:
+        required: true
+        type: string
+      formula_head_sha:
+        required: true
+        type: string
+      request_uuid:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: homebrew-publishing
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: verify trusted formula head and immutable source
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.workflow_ref == 'yurirocha15/homebrew-mcp-cpp-sdk/.github/workflows/publish-bottles.yml@refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      source_tag: ${{ steps.input.outputs.source_tag }}
+      formula_pr_number: ${{ steps.input.outputs.formula_pr_number }}
+      formula_branch: ${{ steps.input.outputs.formula_branch }}
+      formula_head_sha: ${{ steps.input.outputs.formula_head_sha }}
+    steps:
+      - name: Checkout protected tap controls only
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Validate exact dispatch
+        id: input
+        env:
+          DISPATCH_JSON: >-
+            {"source_tag":${{ toJSON(inputs.source_tag) }},"source_commit_sha":${{ toJSON(inputs.source_commit_sha) }},"github_release_id":${{ toJSON(inputs.github_release_id) }},"source_workflow_run_id":${{ toJSON(inputs.source_workflow_run_id) }},"release_manifest_sha256":${{ toJSON(inputs.release_manifest_sha256) }},"formula_pr_number":${{ toJSON(inputs.formula_pr_number) }},"formula_branch":${{ toJSON(inputs.formula_branch) }},"formula_head_sha":${{ toJSON(inputs.formula_head_sha) }},"request_uuid":${{ toJSON(inputs.request_uuid) }}}
+        run: python3 -I -S publisher/validate_dispatch.py
+      - name: Verify source and exact same-repository App-authored PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_TAG: ${{ steps.input.outputs.source_tag }}
+          SOURCE_SHA: ${{ inputs.source_commit_sha }}
+          RELEASE_ID: ${{ inputs.github_release_id }}
+          SOURCE_RUN_ID: ${{ inputs.source_workflow_run_id }}
+          SOURCE_REPOSITORY_ID: ${{ vars.SOURCE_REPOSITORY_ID }}
+          SOURCE_OWNER_ID: ${{ vars.SOURCE_OWNER_ID }}
+          PR: ${{ steps.input.outputs.formula_pr_number }}
+          BRANCH: ${{ steps.input.outputs.formula_branch }}
+          HEAD_SHA: ${{ steps.input.outputs.formula_head_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_repo="$(gh api /repos/yurirocha15/mcp-cpp-sdk)"
+          test "$(jq -r '.id|tostring' <<<"$source_repo")" = "$SOURCE_REPOSITORY_ID"
+          test "$(jq -r '.owner.id|tostring' <<<"$source_repo")" = "$SOURCE_OWNER_ID"
+          release="$(gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "/repos/yurirocha15/mcp-cpp-sdk/releases/tags/$SOURCE_TAG")"
+          test "$(jq -r '.id|tostring' <<<"$release")" = "$RELEASE_ID"
+          test "$(jq -r '.draft,.prerelease,.immutable' <<<"$release")" = $'false\nfalse\ntrue'
+          source_run=''
+          for _ in $(seq 1 30); do
+            source_run="$(gh api "/repos/yurirocha15/mcp-cpp-sdk/actions/runs/$SOURCE_RUN_ID")"
+            status="$(jq -r '.status' <<<"$source_run")"
+            if [[ "$status" == completed ]]; then
+              break
+            fi
+            [[ "$status" == in_progress || "$status" == queued ]]
+            sleep 10
+          done
+          test "$(jq -r '.event,.conclusion,.head_sha,.head_branch,.path,.repository.id|tostring' <<<"$source_run")" = $'workflow_dispatch\nsuccess\n'"$SOURCE_SHA"$'\nmain\n.github/workflows/release.yml\n'"$SOURCE_REPOSITORY_ID"
+          pull="$(gh api "/repos/yurirocha15/homebrew-mcp-cpp-sdk/pulls/$PR")"
+          test "$(jq -r '.state,.base.ref,.head.ref,.head.sha,.head.repo.full_name' <<<"$pull")" = $'open\nmain\n'"$BRANCH"$'\n'"$HEAD_SHA"$'\nyurirocha15/homebrew-mcp-cpp-sdk'
+          test "$(jq -r '.user.type' <<<"$pull")" = Bot
+          test "$(jq -r '.user.login' <<<"$pull")" = 'mcp-cpp-sdk-homebrew-publisher[bot]'
+          files="$(gh api --paginate "/repos/yurirocha15/homebrew-mcp-cpp-sdk/pulls/$PR/files?per_page=100" --jq '.[].filename')"
+          test "$files" = Formula/mcp-cpp-sdk.rb
+      - name: Verify signed source bundle and annotated tag without source checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_TAG: ${{ steps.input.outputs.source_tag }}
+          SOURCE_SHA: ${{ inputs.source_commit_sha }}
+          MANIFEST_SHA256: ${{ inputs.release_manifest_sha256 }}
+          PRIMARY_FINGERPRINT: ${{ vars.SOURCE_SIGNING_PRIMARY_FINGERPRINT }}
+          TAG_FINGERPRINT: ${{ vars.SOURCE_TAG_SIGNING_SUBKEY_FINGERPRINT }}
+          ARTIFACT_FINGERPRINT: ${{ vars.SOURCE_ARTIFACT_SIGNING_SUBKEY_FINGERPRINT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir release-assets
+          gh release download "$SOURCE_TAG" --repo yurirocha15/mcp-cpp-sdk --dir release-assets
+          python3 -I -S publisher/verify_source_release.py \
+            --directory release-assets --tag "$SOURCE_TAG" --commit "$SOURCE_SHA" \
+            --manifest-sha256 "$MANIFEST_SHA256" \
+            --primary-fingerprint "$PRIMARY_FINGERPRINT" \
+            --artifact-fingerprint "$ARTIFACT_FINGERPRINT"
+          gpg --batch --import release-assets/release-signing-key.asc
+          git init --bare source.git
+          git -C source.git fetch --no-tags --depth=1 https://github.com/yurirocha15/mcp-cpp-sdk.git \
+            "refs/tags/$SOURCE_TAG:refs/tags/$SOURCE_TAG"
+          git -C source.git fetch --no-tags https://github.com/yurirocha15/mcp-cpp-sdk.git \
+            "refs/heads/main:refs/heads/main"
+          test "$(git -C source.git cat-file -t "$SOURCE_TAG")" = tag
+          git -C source.git verify-tag --raw "$SOURCE_TAG" 2>tag.status
+          test "$(git -C source.git rev-list -n1 "$SOURCE_TAG")" = "$SOURCE_SHA"
+          git -C source.git merge-base --is-ancestor "$SOURCE_SHA" refs/heads/main
+          python3 -I -S publisher/verify_git_status.py tag.status "$TAG_FINGERPRINT" "$PRIMARY_FINGERPRINT"
+
+  bottle:
+    name: bottle (${{ matrix.tag }})
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            tag: sequoia
+          - runner: macos-15
+            tag: arm64_sequoia
+          - runner: ubuntu-24.04
+            tag: x86_64_linux
+          - runner: ubuntu-24.04-arm
+            tag: arm64_linux
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout only the prevalidated exact formula head
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.verify.outputs.formula_head_sha }}
+          persist-credentials: false
+      - name: Revalidate exact head and build bottle without publisher credentials
+        env:
+          EXPECTED_HEAD: ${{ needs.verify.outputs.formula_head_sha }}
+          BOTTLE_TAG: ${{ matrix.tag }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          command -v brew
+          brew install --build-bottle ./Formula/mcp-cpp-sdk.rb
+          brew test mcp-cpp-sdk
+          brew bottle --json --root-url=https://ghcr.io/v2/yurirocha15/mcp-cpp-sdk mcp-cpp-sdk
+          mkdir bundle
+          bottle="$(find . -maxdepth 1 -name 'mcp-cpp-sdk--*.bottle*.tar.gz' -print -quit)"
+          metadata="$(find . -maxdepth 1 -name 'mcp-cpp-sdk--*.bottle.json' -print -quit)"
+          test -n "$bottle" && test -n "$metadata"
+          cp "$bottle" "$metadata" Formula/mcp-cpp-sdk.rb bundle/
+          BOTTLE_FILE="$(basename "$bottle")" JSON_FILE="$(basename "$metadata")" \
+          BOTTLE_SHA256="$(shasum -a 256 "$bottle" | awk '{print $1}')" \
+          JSON_SHA256="$(shasum -a 256 "$metadata" | awk '{print $1}')" \
+          python3 -I -S - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          value = {
+              "schema_version": 1,
+              "run_id": os.environ["RUN_ID"],
+              "run_attempt": os.environ["RUN_ATTEMPT"],
+              "bottle_tag": os.environ["BOTTLE_TAG"],
+              "bottle_file": os.environ["BOTTLE_FILE"],
+              "bottle_sha256": os.environ["BOTTLE_SHA256"],
+              "json_file": os.environ["JSON_FILE"],
+              "json_sha256": os.environ["JSON_SHA256"],
+          }
+          Path("bundle/handoff.json").write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+          PY
+      - name: Attest exact bottle
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-path: bundle/*.bottle*.tar.gz
+      - name: Upload same-run bottle bundle
+        id: artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bottle-${{ matrix.tag }}
+          path: bundle/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  assemble:
+    name: assemble digest-bound publication bundle
+    needs: [verify, bottle]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout protected publisher verifier only
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Download only this run's bottle artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: bottle-*
+          path: bottles
+      - name: Verify handoffs and merge bottle blocks without credentials
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -S publisher/verify_handoffs.py --directory bottles \
+            --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT" \
+            --expected-tag sequoia --expected-tag arm64_sequoia \
+            --expected-tag x86_64_linux --expected-tag arm64_linux \
+            --output bottle-ledger.json
+          test "$(find bottles -name mcp-cpp-sdk.rb -print0 | xargs -0 sha256sum | cut -d' ' -f1 | sort -u | wc -l)" = 1
+          mkdir -p Formula
+          cp "$(find bottles -name mcp-cpp-sdk.rb -print -quit)" Formula/mcp-cpp-sdk.rb
+          brew bottle --merge --write --no-commit bottles/*/*.bottle.json
+          artifacts="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/$RUN_ID/artifacts?per_page=100")"
+          jq --argjson artifacts "$artifacts" '.artifact_ids = [$artifacts.artifacts[] | select(.name | startswith("bottle-")) | {id, name, expired}]' bottle-ledger.json >bottle-ledger.tmp
+          mv bottle-ledger.tmp bottle-ledger.json
+          test "$(jq '[.artifact_ids[] | select(.expired == false)] | length' bottle-ledger.json)" = 4
+          mkdir publication
+          cp Formula/mcp-cpp-sdk.rb bottle-ledger.json bottles/*/*.bottle.json bottles/*/*.bottle*.tar.gz publication/
+          sha256sum publication/* | sort -k2 >publication/SHA256SUMS
+      - name: Upload one same-run publication bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: publication-bundle
+          path: publication/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  publish:
+    name: upload bottles and update exact formula branch
+    needs: [verify, assemble]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: homebrew-publish
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+    outputs:
+      bottled_head_sha: ${{ steps.update.outputs.bottled_head_sha }}
+    steps:
+      - name: Download only this run's verified publication bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: publication-bundle
+          path: publication
+      - name: Create repository-scoped publisher App token
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.HOMEBREW_APP_CLIENT_ID }}
+          private-key: ${{ secrets.HOMEBREW_APP_PRIVATE_KEY }}
+          owner: yurirocha15
+          repositories: homebrew-mcp-cpp-sdk
+          permission-contents: write
+          permission-pull-requests: read
+      - name: Upload exact bottles and update formula by API without checkout
+        id: update
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          PACKAGES_TOKEN: ${{ github.token }}
+          HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
+          BRANCH: ${{ needs.verify.outputs.formula_branch }}
+          EXPECTED_HEAD: ${{ needs.verify.outputs.formula_head_sha }}
+          PR: ${{ needs.verify.outputs.formula_pr_number }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum --check publication/SHA256SUMS
+          current="$(gh api "/repos/yurirocha15/homebrew-mcp-cpp-sdk/pulls/$PR" --jq '.head.sha')"
+          test "$current" = "$EXPECTED_HEAD"
+          printf '%s' "$PACKAGES_TOKEN" | docker login ghcr.io -u yurirocha15 --password-stdin
+          brew pr-upload --root-url=https://ghcr.io/v2/yurirocha15/mcp-cpp-sdk publication/*.bottle.json
+          content="$(base64 -w0 publication/mcp-cpp-sdk.rb)"
+          file="$(gh api --method GET "/repos/yurirocha15/homebrew-mcp-cpp-sdk/contents/Formula/mcp-cpp-sdk.rb" -f ref="$BRANCH")"
+          test "$(jq -r '.path' <<<"$file")" = Formula/mcp-cpp-sdk.rb
+          result="$(gh api --method PUT "/repos/yurirocha15/homebrew-mcp-cpp-sdk/contents/Formula/mcp-cpp-sdk.rb" \
+            -f message="brew: add bottles for ${{ needs.verify.outputs.source_tag }}" \
+            -f content="$content" -f sha="$(jq -r '.sha' <<<"$file")" -f branch="$BRANCH")"
+          bottled_head="$(jq -r '.commit.sha' <<<"$result")"
+          test "$(gh api "/repos/yurirocha15/homebrew-mcp-cpp-sdk/pulls/$PR" --jq '.head.sha')" = "$bottled_head"
+          echo "bottled_head_sha=$bottled_head" >>"$GITHUB_OUTPUT"
+          GH_TOKEN="$PACKAGES_TOKEN" gh api --paginate --slurp \
+            '/users/yurirocha15/packages/container/mcp-cpp-sdk%2Fmcp-cpp-sdk/versions?per_page=100' \
+            >package-version-pages.json
+          VERSION="${{ needs.verify.outputs.source_tag }}"
+          VERSION="${VERSION#v}"
+          export VERSION
+          BOTTLED_HEAD="$bottled_head" python3 -I -S - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+
+          ledger = json.loads(Path("publication/bottle-ledger.json").read_text())
+          pages = json.loads(Path("package-version-pages.json").read_text())
+          versions = [item for page in pages for item in page]
+          expected_tags = {f"{os.environ['VERSION']}.{item['bottle_tag']}" for item in ledger["bottles"]}
+          manifests = []
+          for tag in sorted(expected_tags):
+              matches = [
+                  item for item in versions
+                  if tag in item.get("metadata", {}).get("container", {}).get("tags", [])
+              ]
+              if len(matches) != 1 or re.fullmatch(r"sha256:[0-9a-f]{64}", matches[0].get("name", "")) is None:
+                  raise SystemExit(f"exact GHCR manifest not found for {tag}")
+              manifests.append(
+                  {"package": "yurirocha15/mcp-cpp-sdk/mcp-cpp-sdk", "digest": matches[0]["name"], "tag": tag}
+              )
+          ledger.update(
+              run_id=os.environ["RUN_ID"],
+              run_attempt=os.environ["RUN_ATTEMPT"],
+              bottled_head_sha=os.environ["BOTTLED_HEAD"],
+              ghcr_manifests=manifests,
+          )
+          Path("finalization-ledger.json").write_text(
+              json.dumps(ledger, sort_keys=True, separators=(",", ":")) + "\n"
+          )
+          PY
+      - name: Retain same-run finalization evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: finalization-ledger
+          path: finalization-ledger.json
+          if-no-files-found: error
+          retention-days: 7
+
+  finalize:
+    name: protected same-run public verification and merge
+    needs: [verify, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: homebrew-finalize
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Download only this original run's finalization ledger
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: finalization-ledger
+          path: finalization
+      - name: Create repository-scoped publisher App token
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.HOMEBREW_APP_CLIENT_ID }}
+          private-key: ${{ secrets.HOMEBREW_APP_PRIVATE_KEY }}
+          owner: yurirocha15
+          repositories: homebrew-mcp-cpp-sdk
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Revalidate exact head, anonymously verify GHCR, and merge without checkout
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          READ_TOKEN: ${{ github.token }}
+          PR: ${{ needs.verify.outputs.formula_pr_number }}
+          EXPECTED_HEAD: ${{ needs.publish.outputs.bottled_head_sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ledger=finalization/finalization-ledger.json
+          test "$(jq -r '.run_id' "$ledger")" = "$RUN_ID"
+          test "$(jq -r '.run_attempt' "$ledger")" = "$RUN_ATTEMPT"
+          test "$(jq -r '.bottled_head_sha' "$ledger")" = "$EXPECTED_HEAD"
+          test "$(gh api "/repos/yurirocha15/homebrew-mcp-cpp-sdk/pulls/$PR" --jq '.head.sha')" = "$EXPECTED_HEAD"
+          GH_TOKEN="$READ_TOKEN" gh pr checks "$PR" --repo yurirocha15/homebrew-mcp-cpp-sdk --required
+          python3 -I -S /dev/stdin --ledger "$ledger" <<'PY'
+          import argparse
+          import http.client
+          import json
+          from pathlib import Path
+          import re
+          import urllib.parse
+
+          parser = argparse.ArgumentParser()
+          parser.add_argument("--ledger", type=Path, required=True)
+          args = parser.parse_args()
+          ledger = json.loads(args.ledger.read_text())
+          entries = ledger.get("ghcr_manifests")
+          if not isinstance(entries, list) or not entries:
+              raise SystemExit("finalization ledger has no GHCR manifests")
+
+          def get(host, path, headers):
+              connection = http.client.HTTPSConnection(host, timeout=15)
+              try:
+                  connection.request("GET", path, headers=headers)
+                  response = connection.getresponse()
+                  body = response.read(65537)
+                  if len(body) > 65536 or 300 <= response.status < 400:
+                      raise SystemExit("GHCR response oversized or redirected")
+                  return response.status, {key.lower(): value for key, value in response.getheaders()}, body
+              finally:
+                  connection.close()
+
+          for entry in entries:
+              if not isinstance(entry, dict) or set(entry) != {"package", "digest", "tag"}:
+                  raise SystemExit("malformed GHCR manifest identity")
+              package = entry["package"]
+              digest = entry["digest"]
+              if package != "yurirocha15/mcp-cpp-sdk/mcp-cpp-sdk":
+                  raise SystemExit("unexpected GHCR package")
+              if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+                  raise SystemExit("malformed GHCR digest")
+              query = urllib.parse.urlencode(
+                  {"scope": f"repository:{package}:pull", "service": "ghcr.io"}
+              )
+              status, _, body = get("ghcr.io", f"/token?{query}", {"User-Agent": "mcp-cpp-sdk-finalizer/1"})
+              if status != 200:
+                  raise SystemExit("anonymous GHCR token request failed")
+              token = json.loads(body).get("token")
+              if not isinstance(token, str) or not token:
+                  raise SystemExit("anonymous GHCR token response malformed")
+              status, headers, _ = get(
+                  "ghcr.io",
+                  f"/v2/{package}/manifests/{digest}",
+                  {
+                      "Accept": "application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json",
+                      "Authorization": f"Bearer {token}",
+                      "User-Agent": "mcp-cpp-sdk-finalizer/1",
+                  },
+              )
+              if status != 200 or headers.get("docker-content-digest") != digest:
+                  raise SystemExit("anonymous GHCR manifest digest mismatch")
+          PY
+          merged="$(gh api --method PUT "/repos/yurirocha15/homebrew-mcp-cpp-sdk/pulls/$PR/merge" \
+            -f merge_method=squash -f sha="$EXPECTED_HEAD")"
+          test "$(jq -r '.merged' <<<"$merged")" = true

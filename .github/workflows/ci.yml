@@ -1,0 +1,53 @@
+name: tap-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  tap-policy:
+    name: tap-policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest tests.test_workflow_policy.SecurityPolicyTests -v
+
+  formula-style-audit:
+    name: formula-style-audit
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - name: Audit formula or permit the initial empty tap
+        run: |
+          formula=Formula/mcp-cpp-sdk.rb
+          if [[ ! -f "${formula}" ]]; then
+            if [[ "${GITHUB_EVENT_NAME}" == push && "${GITHUB_REF_NAME}" == main ]]; then
+              echo "Initial tap bootstrap: formula publication is release-controlled."
+              exit 0
+            fi
+            echo "${formula} is required outside the initial main bootstrap." >&2
+            exit 1
+          fi
+          brew style "${formula}"
+          brew audit --strict "${formula}"
+
+  trusted-bottle-policy:
+    name: trusted-bottle-policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s tests -p 'test_*.py' -v
