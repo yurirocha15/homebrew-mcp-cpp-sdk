@@ -12,6 +12,17 @@ import sys
 
 
 DIGEST = re.compile(r"[0-9a-f]{64}")
+ROOT_URL = "https://ghcr.io/v2/yurirocha15/mcp-cpp-sdk"
+
+
+def _walk(value: object):
+    yield value
+    if isinstance(value, dict):
+        for child in value.values():
+            yield from _walk(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk(child)
 
 
 def sha256(path: Path) -> str:
@@ -32,7 +43,12 @@ def verify(
         expected = {"schema_version", "run_id", "run_attempt", "bottle_tag", "bottle_file", "bottle_sha256", "json_file", "json_sha256"}
         if not isinstance(value, dict) or set(value) != expected or value["schema_version"] != 1:
             raise ValueError(f"invalid handoff schema: {path}")
-        if value["run_id"] != run_id or value["run_attempt"] != run_attempt:
+        if (
+            value["run_id"] != run_id
+            or not isinstance(value["run_attempt"], str)
+            or re.fullmatch(r"[1-9][0-9]*", value["run_attempt"]) is None
+            or int(value["run_attempt"]) > int(run_attempt)
+        ):
             raise ValueError(f"handoff belongs to another workflow run: {path}")
         tag = value["bottle_tag"]
         if not isinstance(tag, str) or not re.fullmatch(r"[a-z0-9_]+", tag) or tag in seen_tags:
@@ -47,11 +63,19 @@ def verify(
             if sha256(artifact) != digest:
                 raise ValueError(f"artifact digest mismatch: {artifact}")
         metadata = json.loads((path.parent / value["json_file"]).read_text(encoding="utf-8"))
-        serialized = json.dumps(metadata, sort_keys=True, separators=(",", ":"))
-        if tag not in serialized or value["bottle_sha256"] not in serialized:
+        nodes = tuple(_walk(metadata))
+        if (
+            sum(1 for node in nodes if isinstance(node, dict) and node.get("sha256") == value["bottle_sha256"]) != 1
+            or not any(isinstance(node, dict) and tag in node for node in nodes)
+        ):
             raise ValueError(f"bottle metadata does not bind its tag and archive digest: {path}")
-        if "https://ghcr.io/v2/yurirocha15/mcp-cpp-sdk" not in serialized:
+        if sum(1 for node in nodes if node == ROOT_URL) != 1:
             raise ValueError(f"bottle metadata has an unexpected root URL: {path}")
+        expected_files = {
+            "handoff.json", "mcp-cpp-sdk.rb", value["bottle_file"], value["json_file"]
+        }
+        if {item.name for item in path.parent.iterdir() if item.is_file()} != expected_files:
+            raise ValueError(f"bottle handoff file inventory is not exact: {path}")
         handoffs.append(value)
     if not handoffs:
         raise ValueError("no bottle handoffs found")

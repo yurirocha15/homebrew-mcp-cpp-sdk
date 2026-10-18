@@ -18,7 +18,12 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           persist-credentials: false
-      - run: python3 -m unittest tests.test_workflow_policy.SecurityPolicyTests -v
+      - name: Compile and test policy code
+        run: |
+          python3 -m compileall -q publisher tests
+          python3 -m unittest tests.test_workflow_policy.SecurityPolicyTests -v
+      - name: Lint workflows with a checksum-pinned actionlint
+        run: scripts/lint_workflows.sh
 
   formula-style-audit:
     name: formula-style-audit
