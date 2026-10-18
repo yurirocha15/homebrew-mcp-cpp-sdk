@@ -106,12 +106,17 @@ class SecurityPolicyTests(unittest.TestCase):
             self.assertEqual(environment["required_reviewer_count"], 1)
             self.assertFalse(environment["administrator_bypass"])
 
-    def test_initial_tap_bootstrap_is_the_only_formula_audit_exception(self) -> None:
+    def test_formula_audit_is_skipped_only_while_no_formula_exists(self) -> None:
         self.assertIn('formula=Formula/mcp-cpp-sdk.rb', self.ci_workflow)
         self.assertIn(
             '[[ "${GITHUB_EVENT_NAME}" == push && "${GITHUB_REF_NAME}" == main ]]',
             self.ci_workflow,
         )
+        self.assertIn(
+            '[[ "${GITHUB_EVENT_NAME}" == pull_request ]] && ! git cat-file -e "HEAD^1:${formula}"',
+            self.ci_workflow,
+        )
+        self.assertIn("fetch-depth: 2", self.ci_workflow)
         self.assertIn('brew style "${formula}"', self.ci_workflow)
         self.assertIn('brew audit --strict "${formula}"', self.ci_workflow)
 
