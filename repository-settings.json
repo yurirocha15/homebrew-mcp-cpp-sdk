@@ -46,6 +46,13 @@
             "trusted-bottle-policy"
         ]
     },
+    "control_tag_ruleset": {
+        "tag": "release-control-v1",
+        "enforcement": "active",
+        "update_blocked": true,
+        "deletion_blocked": true,
+        "bypass_actors": []
+    },
     "environments": [
         {
             "name": "homebrew-publish",
