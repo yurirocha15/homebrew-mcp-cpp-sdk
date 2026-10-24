@@ -28,7 +28,7 @@ STABLE_CAPABILITIES = [
 ]
 PUBLISHER_REPOSITORY = "yurirocha15/homebrew-mcp-cpp-sdk"
 PUBLISHER_WORKFLOW = "publish-bottles.yml"
-CONTROL_TAG = "release-control-v1"
+CONTROL_TAG = "release-control-v2"
 FORMULA_ASSET = "homebrew-mcp-cpp-sdk.rb"
 CONTRACT_ASSET = "release-publication-contract.json"
 
@@ -226,7 +226,10 @@ def _verify_publication_contract(
 def _verify_formula(text: str, tag: str) -> None:
     required = (
         "class McpCppSdk < Formula",
-        f'  version "{tag.removeprefix("v")}"',
+        # The version is bound by the release URL; `brew audit --strict` rejects a
+        # redundant `version` line, so the formula must not be required to carry one.
+        f'  url "https://github.com/yurirocha15/mcp-cpp-sdk/releases/download/{tag}/'
+        f'mcp-cpp-sdk-{tag.removeprefix("v")}.tar.gz"',
         "-DMCP_CPP_SDK_BUILD_SHARED=ON",
         "-DMCP_CPP_SDK_BUILD_STATIC=ON",
         "find_package(mcp-cpp-sdk CONFIG REQUIRED COMPONENTS shared static)",

@@ -55,9 +55,9 @@ class SecurityPolicyTests(unittest.TestCase):
         verify = job(self.workflow, "verify", "bottle")
         self.assertNotIn("\n    if:", verify)
         self.assertIn("Fail closed unless executing the immutable provider control", verify)
-        self.assertIn('test "${GITHUB_REF}" = refs/tags/release-control-v1', verify)
+        self.assertIn('test "${GITHUB_REF}" = refs/tags/release-control-v2', verify)
         self.assertIn('test "${GITHUB_SHA}" = "${EXPECTED_CONTROL_SHA}"', verify)
-        self.assertIn("@refs/tags/release-control-v1", verify)
+        self.assertIn("@refs/tags/release-control-v2", verify)
         self.assertIn("ref: ${{ inputs.provider_control_sha }}", verify)
 
     def test_source_and_control_identities_are_all_consumed(self) -> None:
@@ -102,7 +102,7 @@ class SecurityPolicyTests(unittest.TestCase):
         environments = self.manifest["environments"]
         self.assertEqual({item["name"] for item in environments}, {"homebrew-publish", "homebrew-finalize"})
         for environment in environments:
-            self.assertEqual(environment["deployment_ref"], "refs/tags/release-control-v1")
+            self.assertEqual(environment["deployment_ref"], "refs/tags/release-control-v2")
             self.assertEqual(environment["required_reviewer_count"], 1)
             self.assertFalse(environment["administrator_bypass"])
 
@@ -117,8 +117,32 @@ class SecurityPolicyTests(unittest.TestCase):
             self.ci_workflow,
         )
         self.assertIn("fetch-depth: 2", self.ci_workflow)
-        self.assertIn('brew style "${formula}"', self.ci_workflow)
-        self.assertIn('brew audit --strict "${formula}"', self.ci_workflow)
+        self.assertIn("brew trust --tap yurirocha15/mcp-cpp-sdk", self.ci_workflow)
+        self.assertIn("brew style yurirocha15/mcp-cpp-sdk/mcp-cpp-sdk", self.ci_workflow)
+        self.assertIn("brew audit --strict yurirocha15/mcp-cpp-sdk/mcp-cpp-sdk", self.ci_workflow)
+        self.assertNotIn('brew audit --strict "${formula}"', self.ci_workflow)
+
+    def test_every_brew_job_taps_and_trusts_and_linux_jobs_find_brew(self) -> None:
+        for name, following in (("bottle", "assemble"), ("assemble", "publish"), ("publish", "finalize")):
+            block = job(self.workflow, name, following)
+            self.assertIn("brew tap-new --no-git yurirocha15/mcp-cpp-sdk", block, name)
+            self.assertIn("brew trust --tap yurirocha15/mcp-cpp-sdk", block, name)
+            self.assertIn("/home/linuxbrew/.linuxbrew/bin/brew", block, name)
+            self.assertIn('>>"${GITHUB_PATH}"', block, name)
+        self.assertNotIn("./Formula/mcp-cpp-sdk.rb", self.workflow)
+
+    def test_source_poll_covers_two_hours(self) -> None:
+        verify = job(self.workflow, "verify", "bottle")
+        self.assertIn("timeout-minutes: 150", verify)
+        source = (ROOT / "publisher/verify_source_state.py").read_text()
+        self.assertIn("attempts: int = 240", source)
+        self.assertIn("poll_seconds: float = 30", source)
+
+    def test_checksums_use_plain_names(self) -> None:
+        assemble = job(self.workflow, "assemble", "publish")
+        self.assertNotIn("sha256sum publication/*", assemble)
+        self.assertIn("cd publication", assemble)
+        self.assertIn("! -name SHA256SUMS", assemble)
 
     def test_actionlint_download_is_version_and_checksum_pinned(self) -> None:
         script = (ROOT / "scripts/lint_workflows.sh").read_text()

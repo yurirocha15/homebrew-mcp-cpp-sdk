@@ -29,6 +29,9 @@ jobs:
     name: formula-style-audit
     runs-on: macos-15
     timeout-minutes: 15
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_ANALYTICS: "1"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
@@ -50,8 +53,16 @@ jobs:
             echo "${formula} is required outside the initial main bootstrap." >&2
             exit 1
           fi
-          brew style "${formula}"
-          brew audit --strict "${formula}"
+          # Homebrew requires formulae to live in a trusted tap; audit by tap name.
+          brew tap-new --no-git yurirocha15/mcp-cpp-sdk
+          tap_dir="$(brew --repository yurirocha15/mcp-cpp-sdk)"
+          mkdir -p "${tap_dir}/Formula"
+          cp "${formula}" "${tap_dir}/Formula/mcp-cpp-sdk.rb"
+          if brew trust --help >/dev/null 2>&1; then
+            brew trust --tap yurirocha15/mcp-cpp-sdk
+          fi
+          brew style yurirocha15/mcp-cpp-sdk/mcp-cpp-sdk
+          brew audit --strict yurirocha15/mcp-cpp-sdk/mcp-cpp-sdk
 
   trusted-bottle-policy:
     name: trusted-bottle-policy
