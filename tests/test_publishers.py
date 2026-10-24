@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -11,7 +12,12 @@ from unittest import mock
 from publisher.homebrew_publish import (
     BOTTLE_TAGS,
     FORMULA_PATH,
-    _package_records,
+    _content,
+    _expected_manifests,
+    _has_version_tag,
+    _index_records,
+    _package_pages,
+    _upload_bottles,
     finalize,
     load_bottles,
     plan_formula_pr,
@@ -61,11 +67,11 @@ class DispatchTests(unittest.TestCase):
             request,
             {
                 "GITHUB_REPOSITORY": "yurirocha15/homebrew-mcp-cpp-sdk",
-                "GITHUB_REF": "refs/tags/release-control-v1",
+                "GITHUB_REF": "refs/tags/release-control-v2",
                 "GITHUB_SHA": CONTROL_SHA,
                 "GITHUB_WORKFLOW_REF": (
                     "yurirocha15/homebrew-mcp-cpp-sdk/.github/workflows/"
-                    "publish-bottles.yml@refs/tags/release-control-v1"
+                    "publish-bottles.yml@refs/tags/release-control-v2"
                 ),
             },
         )
@@ -138,6 +144,73 @@ class SourceStateTests(unittest.TestCase):
         )
         self.assertNotEqual(SOURCE_SHA, WORKFLOW_SHA)
 
+    def run_api(self, statuses, conclusion="success"):
+        """API whose run endpoint yields the given statuses or exceptions in order."""
+        base = self.api()
+        queue = list(statuses)
+        endpoint = "repos/yurirocha15/mcp-cpp-sdk/actions/runs/40"
+
+        def api(path):
+            if path != endpoint:
+                return base(path)
+            item = queue.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            run = dict(base(endpoint))
+            run["status"] = item
+            run["conclusion"] = conclusion if item == "completed" else None
+            return run
+
+        return api, queue
+
+    def poll(self, api, sleeps, **kwargs):
+        verify_source_state(
+            api,
+            source_repository_id=10,
+            source_owner_id=20,
+            source_tag="v0.2.0",
+            source_workflow_head_sha=WORKFLOW_SHA,
+            github_release_id=30,
+            source_workflow_run_id=40,
+            sleeper=sleeps.append,
+            **kwargs,
+        )
+
+    def test_waits_through_approval_gated_statuses_for_two_hours(self) -> None:
+        statuses = ["queued", "in_progress", "waiting", "requested", "pending", "completed"]
+        api, queue = self.run_api(statuses)
+        sleeps: list[float] = []
+        self.poll(api, sleeps)
+        self.assertEqual(queue, [])
+        self.assertEqual(sleeps, [30] * 5)
+        # 240 attempts at 30 seconds cover two hours.
+        api, queue = self.run_api(["waiting"] * 240)
+        sleeps = []
+        with self.assertRaisesRegex(ValueError, "workflow run"):
+            self.poll(api, sleeps)
+        self.assertEqual((len(sleeps), queue), (239, []))
+        with self.assertRaisesRegex(ValueError, "attempt count"):
+            self.poll(self.api(), [], attempts=241)
+
+    def test_rejects_unknown_status_and_failed_conclusion(self) -> None:
+        api, _ = self.run_api(["mystery"])
+        with self.assertRaisesRegex(ValueError, "invalid status"):
+            self.poll(api, [])
+        api, _ = self.run_api(["completed"], conclusion="failure")
+        with self.assertRaisesRegex(ValueError, "workflow run"):
+            self.poll(api, [])
+
+    def test_tolerates_four_consecutive_transient_failures(self) -> None:
+        boom = subprocess.CalledProcessError(1, ["gh"])
+        api, queue = self.run_api([boom] * 4 + ["in_progress", boom, boom, "completed"])
+        sleeps: list[float] = []
+        self.poll(api, sleeps)
+        self.assertEqual(queue, [])
+        api, queue = self.run_api([boom] * 5 + ["completed"])
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.poll(api, [])
+        self.assertEqual(queue, ["completed"])
+
     def test_rejects_wrong_workflow_head(self) -> None:
         with self.assertRaisesRegex(ValueError, "workflow run"):
             verify_source_state(
@@ -178,7 +251,7 @@ def contract(control_sha: str = CONTROL_SHA) -> dict[str, object]:
         "provider_controls": {
             "homebrew": {
                 "repository": "yurirocha15/homebrew-mcp-cpp-sdk",
-                "control_tag": "release-control-v1",
+                "control_tag": "release-control-v2",
                 "control_commit": control_sha,
                 "workflow": "publish-bottles.yml",
             },
@@ -189,7 +262,7 @@ def contract(control_sha: str = CONTROL_SHA) -> dict[str, object]:
 
 
 FORMULA = '''class McpCppSdk < Formula
-  version "0.2.0"
+  url "https://github.com/yurirocha15/mcp-cpp-sdk/releases/download/v0.2.0/mcp-cpp-sdk-0.2.0.tar.gz"
   -DMCP_CPP_SDK_BUILD_SHARED=ON
   -DMCP_CPP_SDK_BUILD_STATIC=ON
   find_package(mcp-cpp-sdk CONFIG REQUIRED COMPONENTS shared static)
@@ -212,6 +285,9 @@ class SignedPolicyTests(unittest.TestCase):
 
     def test_formula_requires_static_and_shared_consumers(self) -> None:
         _verify_formula(FORMULA, "v0.2.0")
+        self.assertNotIn("version ", FORMULA)
+        with self.assertRaisesRegex(ValueError, "static and shared"):
+            _verify_formula(FORMULA.replace("v0.2.0", "v0.2.1"), "v0.2.0")
         with self.assertRaisesRegex(ValueError, "static and shared"):
             _verify_formula(FORMULA.replace("MCP_CPP_SDK_BUILD_STATIC=ON", "MCP_CPP_SDK_BUILD_STATIC=OFF"), "v0.2.0")
 
@@ -269,17 +345,100 @@ class PublicationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_bottles(path, run_id="10", run_attempt="1")
 
-    def test_package_inventory_rejects_partial_existing_state(self) -> None:
+    def index(self, bottles, *, skip=()):
+        return {
+            "schemaVersion": 2,
+            "manifests": [
+                {
+                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                    "digest": "sha256:" + chr(ord("a") + number) * 64,
+                    "annotations": {
+                        "org.opencontainers.image.ref.name": f"0.2.0.{bottle['bottle_tag']}",
+                        "sh.brew.bottle.digest": bottle["bottle_sha256"],
+                    },
+                }
+                for number, bottle in enumerate(bottles)
+                if bottle["bottle_tag"] not in skip
+            ],
+        }
+
+    def test_index_records_match_manifests_by_ref_name_annotation(self) -> None:
         bottles = [
-            {"bottle_tag": tag, "bottle_sha256": "a" * 64}
-            for tag in sorted(BOTTLE_TAGS)
+            {"bottle_tag": tag, "bottle_sha256": str(number) * 64}
+            for number, tag in enumerate(sorted(BOTTLE_TAGS), start=1)
         ]
-        pages = [[{
-            "name": "sha256:" + "b" * 64,
-            "metadata": {"container": {"tags": ["0.2.0.sequoia"]}},
-        }]]
+        expected = _expected_manifests(bottles, "0.2.0")
+        records = _index_records(self.index(bottles), expected)
+        self.assertEqual([item["tag"] for item in records], sorted(f"0.2.0.{t}" for t in BOTTLE_TAGS))
         with self.assertRaisesRegex(ValueError, "partial"):
-            _package_records(pages, bottles, "0.2.0")
+            _index_records(self.index(bottles, skip={"sequoia"}), expected)
+        wrong = self.index(bottles)
+        wrong["manifests"][0]["annotations"]["sh.brew.bottle.digest"] = "f" * 64
+        with self.assertRaisesRegex(ValueError, "exact bottle digest"):
+            _index_records(wrong, expected)
+
+    def test_version_tag_marks_an_existing_publication(self) -> None:
+        index_version = {"name": "sha256:" + "b" * 64, "metadata": {"container": {"tags": ["0.2.0"]}}}
+        untagged = {"name": "sha256:" + "c" * 64, "metadata": {"container": {"tags": []}}}
+        self.assertTrue(_has_version_tag([[untagged, index_version]], "0.2.0"))
+        self.assertFalse(_has_version_tag([[untagged]], "0.2.0"))
+        self.assertFalse(_has_version_tag([], "0.2.0"))
+
+    def test_missing_package_before_first_upload_means_no_versions(self) -> None:
+        missing = subprocess.CompletedProcess([], 1, b'{"message":"Not Found"}', b"gh: Not Found (HTTP 404)")
+        with mock.patch("publisher.homebrew_publish.subprocess.run", return_value=missing):
+            self.assertEqual(_package_pages("token"), [])
+        broken = subprocess.CompletedProcess([], 1, b"", b"gh: Server Error (HTTP 500)")
+        with (
+            mock.patch("publisher.homebrew_publish.subprocess.run", return_value=broken),
+            self.assertRaisesRegex(ValueError, "listing failed"),
+        ):
+            _package_pages("token")
+
+    def test_contents_api_base64_with_newlines_is_decoded(self) -> None:
+        formula = b"class McpCppSdk < Formula\n" * 20
+        encoded = base64.encodebytes(formula).decode()
+        self.assertIn("\n", encoded.strip())
+        api = FakeApi({("GET", "repos/yurirocha15/homebrew-mcp-cpp-sdk/contents/Formula/mcp-cpp-sdk.rb?ref=main"): {
+            "path": FORMULA_PATH, "encoding": "base64", "sha": SOURCE_SHA, "content": encoded,
+        }})
+        self.assertEqual(_content(api, "main"), (SOURCE_SHA, formula))
+        api.responses[next(iter(api.responses))]["content"] = "!!!!"
+        with self.assertRaisesRegex(ValueError, "base64"):
+            _content(api, "main")
+
+    def test_upload_uses_pr_upload_upload_only_in_a_scratch_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for tag in sorted(BOTTLE_TAGS):
+                (root / f"mcp-cpp-sdk--0.2.0.{tag}.bottle.json").write_text("{}")
+                (root / f"mcp-cpp-sdk--0.2.0.{tag}.bottle.tar.gz").write_bytes(b"x")
+            seen = {}
+
+            def fake_run(command, **kwargs):
+                seen["command"] = command
+                seen["env"] = kwargs["env"]
+                seen["files"] = sorted(path.name for path in Path(kwargs["cwd"]).iterdir())
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with mock.patch.dict("os.environ", {"GH_TOKEN": "app"}), mock.patch(
+                "publisher.homebrew_publish.subprocess.run", side_effect=fake_run
+            ) as run:
+                _upload_bottles(root, "secret-token")
+            self.assertEqual(run.call_count, 1)
+            self.assertEqual(seen["command"][:3], ["brew", "pr-upload", "--upload-only"])
+            self.assertEqual(len(seen["command"]), 4)  # no named arguments
+            self.assertEqual(seen["env"]["HOMEBREW_GITHUB_PACKAGES_USER"], "yurirocha15")
+            self.assertEqual(seen["env"]["HOMEBREW_GITHUB_PACKAGES_TOKEN"], "secret-token")
+            self.assertNotIn("GH_TOKEN", seen["env"])
+            self.assertEqual(len(seen["files"]), 8)
+            self.assertEqual(sorted(path.name for path in root.iterdir()).__len__(), 8)
+            failed = subprocess.CompletedProcess([], 1, "", "boom secret-token")
+            with (
+                mock.patch("publisher.homebrew_publish.subprocess.run", return_value=failed),
+                self.assertRaisesRegex(ValueError, r"boom \*\*\*"),
+            ):
+                _upload_bottles(root, "secret-token")
 
     def test_formula_plan_allows_only_absent_or_exact_branch(self) -> None:
         branch = release_branch("v0.2.0")
@@ -319,7 +478,25 @@ class PublicationTests(unittest.TestCase):
             }
             for index, tag in enumerate(sorted(BOTTLE_TAGS), start=1)
         ]
-        responses = [(200, {}, b'{"token":"public"}')]
+        index_body = json.dumps({
+            "schemaVersion": 2,
+            "manifests": [
+                {
+                    "digest": entry["digest"],
+                    "annotations": {
+                        "org.opencontainers.image.ref.name": entry["tag"],
+                        "sh.brew.bottle.digest": entry["bottle_sha256"],
+                    },
+                }
+                for entry in entries
+            ],
+        }).encode()
+        index_response = (
+            200,
+            {"docker-content-digest": "sha256:" + hashlib.sha256(index_body).hexdigest()},
+            index_body,
+        )
+        responses = [(200, {}, b'{"token":"public"}'), index_response]
         responses.extend(
             (
                 200,
@@ -333,8 +510,9 @@ class PublicationTests(unittest.TestCase):
             )
             for entry in entries
         )
-        with mock.patch("publisher.homebrew_publish._registry_get", side_effect=responses):
-            verify_public_manifests(entries)
+        with mock.patch("publisher.homebrew_publish._registry_get", side_effect=responses) as get:
+            verify_public_manifests(entries, "0.2.0")
+        self.assertTrue(get.call_args_list[1].args[1].endswith("/manifests/0.2.0"))
         responses[-1] = (
             200,
             {"docker-content-digest": entries[-1]["digest"]},
@@ -344,7 +522,13 @@ class PublicationTests(unittest.TestCase):
             mock.patch("publisher.homebrew_publish._registry_get", side_effect=responses),
             self.assertRaisesRegex(ValueError, "exact bottle"),
         ):
-            verify_public_manifests(entries)
+            verify_public_manifests(entries, "0.2.0")
+        tampered = [(200, {}, b'{"token":"public"}'), (200, {"docker-content-digest": "sha256:" + "0" * 64}, index_body)]
+        with (
+            mock.patch("publisher.homebrew_publish._registry_get", side_effect=tampered),
+            self.assertRaisesRegex(ValueError, "digest differs"),
+        ):
+            verify_public_manifests(entries, "0.2.0")
 
     def test_finalizer_treats_an_exact_merged_pr_as_idempotent(self) -> None:
         formula = b"published formula"

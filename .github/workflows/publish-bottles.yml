@@ -43,7 +43,7 @@ jobs:
   verify:
     name: verify immutable source and provider control
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 150
     permissions:
       contents: read
       actions: read
@@ -61,10 +61,10 @@ jobs:
         env:
           EXPECTED_CONTROL_SHA: ${{ inputs.provider_control_sha }}
         run: |
-          test "${GITHUB_REF}" = refs/tags/release-control-v1
+          test "${GITHUB_REF}" = refs/tags/release-control-v2
           test "${GITHUB_SHA}" = "${EXPECTED_CONTROL_SHA}"
           test "${GITHUB_WORKFLOW_REF}" = \
-            yurirocha15/homebrew-mcp-cpp-sdk/.github/workflows/publish-bottles.yml@refs/tags/release-control-v1
+            yurirocha15/homebrew-mcp-cpp-sdk/.github/workflows/publish-bottles.yml@refs/tags/release-control-v2
       - name: Checkout only the immutable provider control
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -177,16 +177,37 @@ jobs:
         with:
           name: verified-formula
           path: Formula
+      - name: Put the preinstalled Linuxbrew on PATH
+        if: runner.os == 'Linux'
+        run: |
+          test -x /home/linuxbrew/.linuxbrew/bin/brew
+          echo /home/linuxbrew/.linuxbrew/bin >>"${GITHUB_PATH}"
+          echo /home/linuxbrew/.linuxbrew/sbin >>"${GITHUB_PATH}"
+      - name: Create and trust the local tap holding the formula
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_ANALYTICS: "1"
+        run: |
+          command -v brew
+          brew tap-new --no-git yurirocha15/mcp-cpp-sdk
+          tap_dir="$(brew --repository yurirocha15/mcp-cpp-sdk)"
+          mkdir -p "${tap_dir}/Formula"
+          cp Formula/mcp-cpp-sdk.rb "${tap_dir}/Formula/mcp-cpp-sdk.rb"
+          # Homebrew 7 refuses to load formulae from untrusted taps.
+          if brew trust --help >/dev/null 2>&1; then
+            brew trust --tap yurirocha15/mcp-cpp-sdk
+          fi
       - name: Build and test static and shared consumers
         env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_ANALYTICS: "1"
           BOTTLE_TAG: ${{ matrix.tag }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
-          command -v brew
-          brew install --build-bottle ./Formula/mcp-cpp-sdk.rb
-          brew test mcp-cpp-sdk
-          brew bottle --json --root-url=https://ghcr.io/v2/yurirocha15/mcp-cpp-sdk mcp-cpp-sdk
+          brew install --build-bottle yurirocha15/mcp-cpp-sdk/mcp-cpp-sdk
+          brew test yurirocha15/mcp-cpp-sdk/mcp-cpp-sdk
+          brew bottle --json --root-url=https://ghcr.io/v2/yurirocha15/mcp-cpp-sdk yurirocha15/mcp-cpp-sdk/mcp-cpp-sdk
           mkdir bundle
           bottle_count="$(find . -maxdepth 1 -name 'mcp-cpp-sdk--*.bottle*.tar.gz' -print | wc -l)"
           metadata_count="$(find . -maxdepth 1 -name 'mcp-cpp-sdk--*.bottle.json' -print | wc -l)"
@@ -234,7 +255,13 @@ jobs:
         with:
           pattern: bottle-*
           path: bottles
-      - name: Verify handoffs and merge exact bottle blocks
+      - name: Put the preinstalled Linuxbrew on PATH
+        if: runner.os == 'Linux'
+        run: |
+          test -x /home/linuxbrew/.linuxbrew/bin/brew
+          echo /home/linuxbrew/.linuxbrew/bin >>"${GITHUB_PATH}"
+          echo /home/linuxbrew/.linuxbrew/sbin >>"${GITHUB_PATH}"
+      - name: Verify handoffs
         env:
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
@@ -247,11 +274,39 @@ jobs:
           test "$(find bottles -name mcp-cpp-sdk.rb -print0 | xargs -0 sha256sum | cut -d' ' -f1 | sort -u | wc -l)" = 1
           mkdir -p Formula
           cp "$(find bottles -name mcp-cpp-sdk.rb -print -quit)" Formula/mcp-cpp-sdk.rb
-          brew bottle --merge --write --no-commit bottles/*/*.bottle.json
+      - name: Create and trust the local tap holding the formula
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_ANALYTICS: "1"
+        run: |
+          command -v brew
+          brew tap-new --no-git yurirocha15/mcp-cpp-sdk
+          tap_dir="$(brew --repository yurirocha15/mcp-cpp-sdk)"
+          mkdir -p "${tap_dir}/Formula"
+          cp Formula/mcp-cpp-sdk.rb "${tap_dir}/Formula/mcp-cpp-sdk.rb"
+          # Homebrew 7 refuses to load formulae from untrusted taps.
+          if brew trust --help >/dev/null 2>&1; then
+            brew trust --tap yurirocha15/mcp-cpp-sdk
+          fi
+      - name: Merge exact bottle blocks and build the publication bundle
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_ANALYTICS: "1"
+        run: |
           mkdir publication
-          cp Formula/mcp-cpp-sdk.rb bottle-ledger.json \
-            bottles/*/*.bottle.json bottles/*/*.bottle*.tar.gz publication/
-          sha256sum publication/* | sort -k2 >publication/SHA256SUMS
+          cp bottle-ledger.json bottles/*/*.bottle.json bottles/*/*.bottle*.tar.gz publication/
+          # The merge writes the bottle block into the tap's copy of the formula.
+          brew bottle --merge --write --no-commit bottles/*/*.bottle.json
+          tap_dir="$(brew --repository yurirocha15/mcp-cpp-sdk)"
+          cp "${tap_dir}/Formula/mcp-cpp-sdk.rb" publication/mcp-cpp-sdk.rb
+          grep -Fq '  bottle do' publication/mcp-cpp-sdk.rb
+          for tag in sequoia arm64_sequoia x86_64_linux arm64_linux; do
+            test "$(grep -Ec "^    sha256 .*\b${tag}: +\"[0-9a-f]{64}\"" publication/mcp-cpp-sdk.rb)" = 1
+          done
+          # Plain file names, without a directory prefix and without SHA256SUMS itself.
+          sums="$(cd publication && find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' \
+            | LC_ALL=C sort | xargs sha256sum)"
+          printf '%s\n' "${sums}" >publication/SHA256SUMS
       - name: Upload same-run publication bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -286,6 +341,26 @@ jobs:
         with:
           name: publication-bundle
           path: publication
+      - name: Put the preinstalled Linuxbrew on PATH
+        if: runner.os == 'Linux'
+        run: |
+          test -x /home/linuxbrew/.linuxbrew/bin/brew
+          echo /home/linuxbrew/.linuxbrew/bin >>"${GITHUB_PATH}"
+          echo /home/linuxbrew/.linuxbrew/sbin >>"${GITHUB_PATH}"
+      - name: Create and trust the local tap holding the bottled formula
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_ANALYTICS: "1"
+        run: |
+          command -v brew
+          brew tap-new --no-git yurirocha15/mcp-cpp-sdk
+          tap_dir="$(brew --repository yurirocha15/mcp-cpp-sdk)"
+          mkdir -p "${tap_dir}/Formula"
+          cp publication/mcp-cpp-sdk.rb "${tap_dir}/Formula/mcp-cpp-sdk.rb"
+          # Homebrew 7 refuses to load formulae from untrusted taps.
+          if brew trust --help >/dev/null 2>&1; then
+            brew trust --tap yurirocha15/mcp-cpp-sdk
+          fi
       - name: Create repository-scoped publisher App token
         id: app
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -301,6 +376,8 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           PACKAGES_TOKEN: ${{ github.token }}
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_ANALYTICS: "1"
           SOURCE_TAG: ${{ needs.verify.outputs.source_tag }}
           REQUEST_UUID: ${{ needs.verify.outputs.request_uuid }}
           MANIFEST_SHA256: ${{ needs.verify.outputs.release_manifest_sha256 }}

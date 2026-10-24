@@ -11,8 +11,10 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from typing import Mapping, Protocol, Sequence
 from urllib.parse import quote, urlencode
 
@@ -24,6 +26,10 @@ BOTTLE_TAGS = {"sequoia", "arm64_sequoia", "x86_64_linux", "arm64_linux"}
 SHA1 = re.compile(r"[0-9a-f]{40}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 OCI_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+INDEX_MEDIA_TYPE = "application/vnd.oci.image.index.v1+json"
+REF_NAME = "org.opencontainers.image.ref.name"
+BOTTLE_DIGEST = "sh.brew.bottle.digest"
+PACKAGES_USER = "yurirocha15"
 
 
 class Api(Protocol):
@@ -196,7 +202,8 @@ def _content(api: Api, branch: str) -> tuple[str, bytes] | None:
     ):
         raise ValueError("GitHub formula content response is malformed")
     try:
-        content = base64.b64decode(item["content"], validate=True)
+        # The Contents API wraps its base64 in newlines; strip whitespace only.
+        content = base64.b64decode(re.sub(r"\s+", "", item["content"]), validate=True)
     except ValueError as error:
         raise ValueError("GitHub formula content is not canonical base64") from error
     return str(item["sha"]), content
@@ -282,38 +289,110 @@ def plan_formula_pr(
     return base_sha, pull
 
 
-def _package_records(value: object, bottles: list[dict[str, str]], version: str) -> list[dict[str, str]]:
+def _has_version_tag(value: object, version: str) -> bool:
+    """Return whether the GHCR package already has the Homebrew image index tag."""
+
     if not isinstance(value, list) or any(not isinstance(page, list) for page in value):
         raise ValueError("GitHub package version pages are malformed")
-    versions = [item for page in value for item in page]
-    records: list[dict[str, str]] = []
-    for bottle in bottles:
-        tag = f"{version}.{bottle['bottle_tag']}"
-        matches = []
-        for item in versions:
+    matches = 0
+    for page in value:
+        for item in page:
             if not isinstance(item, Mapping):
                 raise ValueError("GitHub package version is not an object")
             metadata = _mapping(item.get("metadata"), "package metadata")
             container = _mapping(metadata.get("container"), "package container metadata")
             tags = container.get("tags")
-            if not isinstance(tags, list) or any(not isinstance(value, str) for value in tags):
+            if not isinstance(tags, list) or any(not isinstance(tag, str) for tag in tags):
                 raise ValueError("GitHub package version tags are malformed")
-            if tag in tags:
-                matches.append(item)
+            if version in tags:
+                matches += 1
+    if matches > 1:
+        raise ValueError(f"multiple GHCR package versions have tag {version}")
+    return matches == 1
+
+
+def _index_records(index: object, expected: Sequence[Mapping[str, str]]) -> list[dict[str, str]]:
+    """Match per-platform manifests of Homebrew's OCI image index by ref.name annotation.
+
+    Homebrew publishes one image index tagged <version> whose manifest descriptors
+    carry org.opencontainers.image.ref.name = <version>.<bottle tag>.
+    """
+
+    document = _mapping(index, "GHCR image index")
+    manifests = document.get("manifests")
+    if document.get("schemaVersion") != 2 or not isinstance(manifests, list):
+        raise ValueError("GHCR image index is malformed")
+    records: list[dict[str, str]] = []
+    for want in expected:
+        matches = []
+        for descriptor in manifests:
+            annotations = _mapping(
+                _mapping(descriptor, "GHCR index descriptor").get("annotations"),
+                "GHCR index descriptor annotations",
+            )
+            if annotations.get(REF_NAME) == want["tag"]:
+                matches.append((descriptor, annotations))
         if len(matches) > 1:
-            raise ValueError(f"multiple GHCR manifests have tag {tag}")
-        if matches:
-            digest = matches[0].get("name")
-            if not isinstance(digest, str) or OCI_DIGEST.fullmatch(digest) is None:
-                raise ValueError("GHCR package version digest is malformed")
-            records.append({
-                "bottle_sha256": bottle["bottle_sha256"],
-                "digest": digest,
-                "tag": tag,
-            })
-    if len(records) not in {0, len(bottles)}:
-        raise ValueError("GHCR contains a partial conflicting bottle publication")
+            raise ValueError(f"multiple GHCR manifests have ref name {want['tag']}")
+        if not matches:
+            continue
+        descriptor, annotations = matches[0]
+        digest = descriptor.get("digest")
+        if not isinstance(digest, str) or OCI_DIGEST.fullmatch(digest) is None:
+            raise ValueError("GHCR index manifest digest is malformed")
+        if annotations.get(BOTTLE_DIGEST) != want["bottle_sha256"]:
+            raise ValueError(f"GHCR manifest {want['tag']} does not carry the exact bottle digest")
+        records.append({"bottle_sha256": want["bottle_sha256"], "digest": digest, "tag": want["tag"]})
+    if len(records) != len(expected):
+        raise ValueError("GHCR image index is a partial conflicting bottle publication")
     return sorted(records, key=lambda item: item["tag"])
+
+
+def _expected_manifests(bottles: Sequence[Mapping[str, str]], version: str) -> list[dict[str, str]]:
+    return [
+        {"tag": f"{version}.{bottle['bottle_tag']}", "bottle_sha256": bottle["bottle_sha256"]}
+        for bottle in bottles
+    ]
+
+
+def _ghcr_token(basic: str | None = None) -> str:
+    query = urlencode({"scope": f"repository:{PACKAGE}:pull", "service": "ghcr.io"})
+    headers = {"User-Agent": "mcp-cpp-sdk-homebrew-publisher/1"}
+    if basic is not None:
+        headers["Authorization"] = "Basic " + base64.b64encode(basic.encode()).decode("ascii")
+    status, _, body = _registry_get("ghcr.io", f"/token?{query}", headers)
+    if status != 200:
+        raise ValueError("GHCR token request failed")
+    try:
+        token = _mapping(
+            json.loads(body.decode("utf-8"), object_pairs_hook=_strict_pairs),
+            "GHCR token response",
+        ).get("token")
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("GHCR token response is malformed") from error
+    if not isinstance(token, str) or not token:
+        raise ValueError("GHCR token response has no token")
+    return token
+
+
+def _fetch_index(token: str, version: str) -> object:
+    status, headers, body = _registry_get(
+        "ghcr.io",
+        f"/v2/{PACKAGE}/manifests/{quote(version, safe='')}",
+        {
+            "Accept": INDEX_MEDIA_TYPE,
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "mcp-cpp-sdk-homebrew-publisher/1",
+        },
+    )
+    if status != 200:
+        raise ValueError(f"GHCR image index {version} is not readable (HTTP {status})")
+    if headers.get("docker-content-digest") != "sha256:" + _sha256_bytes(body):
+        raise ValueError("GHCR image index digest differs from its content")
+    try:
+        return json.loads(body.decode("utf-8"), object_pairs_hook=_strict_pairs)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("GHCR image index is malformed JSON") from error
 
 
 def _package_pages(token: str) -> object:
@@ -324,24 +403,47 @@ def _package_pages(token: str) -> object:
             "X-GitHub-Api-Version: 2026-03-10",
             "/users/yurirocha15/packages/container/mcp-cpp-sdk%2Fmcp-cpp-sdk/versions?per_page=100",
         ],
-        check=True, capture_output=True, env=env, timeout=60,
+        check=False, capture_output=True, env=env, timeout=60,
     )
+    if result.returncode != 0:
+        # Before the first upload the package does not exist yet.
+        if b"HTTP 404" in result.stderr or b"HTTP 404" in result.stdout:
+            return []
+        raise ValueError("GitHub package version listing failed")
     return json.loads(result.stdout.decode("utf-8"), object_pairs_hook=_strict_pairs)
 
 
 def _upload_bottles(directory: Path, token: str) -> None:
-    subprocess.run(
-        ["docker", "login", "ghcr.io", "-u", "yurirocha15", "--password-stdin"],
-        input=token.encode(), check=True, capture_output=True, timeout=60,
-    )
-    metadata = sorted(str(path) for path in directory.glob("*.bottle.json"))
+    """Upload with `brew pr-upload --upload-only`, which reads *.bottle.json from the CWD.
+
+    The formula carrying the merged bottle block must already be in a trusted tap
+    at the path recorded in the bottle metadata.
+    """
+
+    metadata = sorted(directory.glob("*.bottle.json"))
     if len(metadata) != 4:
         raise ValueError("publication bundle does not contain four bottle metadata files")
-    env = dict(os.environ, HOMEBREW_GITHUB_API_TOKEN=token)
-    subprocess.run(
-        ["brew", "pr-upload", f"--root-url=https://ghcr.io/v2/yurirocha15/mcp-cpp-sdk", *metadata],
-        check=True, capture_output=True, env=env, timeout=600,
+    env = dict(
+        os.environ,
+        HOMEBREW_GITHUB_PACKAGES_USER=PACKAGES_USER,
+        HOMEBREW_GITHUB_PACKAGES_TOKEN=token,
+        HOMEBREW_NO_AUTO_UPDATE="1",
+        HOMEBREW_NO_ANALYTICS="1",
     )
+    env.pop("GH_TOKEN", None)  # brew needs only the packages credentials
+    with tempfile.TemporaryDirectory() as work:
+        for path in [*metadata, *sorted(directory.glob("*.bottle*.tar.gz"))]:
+            shutil.copy2(path, work)
+        result = subprocess.run(
+            [
+                "brew", "pr-upload", "--upload-only",
+                "--root-url=https://ghcr.io/v2/yurirocha15/mcp-cpp-sdk",
+            ],
+            cwd=work, check=False, capture_output=True, text=True, env=env, timeout=1800,
+        )
+    if result.returncode != 0:
+        tail = (result.stdout + result.stderr)[-2000:].replace(token, "***")
+        raise ValueError(f"brew pr-upload failed with exit {result.returncode}: {tail}")
 
 
 def _write_formula_and_pr(
@@ -403,13 +505,17 @@ def publish(
     formula_sha = _sha256_bytes(formula)
     branch = release_branch(source_tag)
     version = source_tag.removeprefix("v")
-    manifests = _package_records(_package_pages(packages_token), bottles, version)
+    expected = _expected_manifests(bottles, version)
+    registry_auth = f"{PACKAGES_USER}:{packages_token}"
+    manifests: list[dict[str, str]] = []
+    if _has_version_tag(_package_pages(packages_token), version):
+        manifests = _index_records(_fetch_index(_ghcr_token(registry_auth), version), expected)
     base_sha, _ = plan_formula_pr(api, branch=branch, formula=formula)
     if not manifests:
         _upload_bottles(directory, packages_token)
-        manifests = _package_records(_package_pages(packages_token), bottles, version)
-        if len(manifests) != 4:
-            raise ValueError("GHCR did not expose the complete uploaded bottle set")
+        if not _has_version_tag(_package_pages(packages_token), version):
+            raise ValueError("GHCR did not expose the uploaded image index")
+        manifests = _index_records(_fetch_index(_ghcr_token(registry_auth), version), expected)
     body = publication_body(
         source_tag=source_tag,
         request_uuid=request_uuid,
@@ -460,24 +566,26 @@ def _registry_get(host: str, path: str, headers: Mapping[str, str]) -> tuple[int
     return response.status, response_headers, body
 
 
-def verify_public_manifests(manifests: object) -> None:
+def verify_public_manifests(manifests: object, version: str) -> None:
     if not isinstance(manifests, list) or len(manifests) != 4:
         raise ValueError("finalization ledger has no exact GHCR manifest inventory")
-    query = urlencode({"scope": f"repository:{PACKAGE}:pull", "service": "ghcr.io"})
-    status, _, body = _registry_get(
-        "ghcr.io", f"/token?{query}", {"User-Agent": "mcp-cpp-sdk-finalizer/1"}
-    )
-    if status != 200:
-        raise ValueError("anonymous GHCR token request failed")
-    try:
-        token = _mapping(
-            json.loads(body.decode("utf-8"), object_pairs_hook=_strict_pairs),
-            "GHCR token response",
-        ).get("token")
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise ValueError("anonymous GHCR token response is malformed") from error
-    if not isinstance(token, str) or not token:
-        raise ValueError("anonymous GHCR token response has no token")
+    token = _ghcr_token()
+    expected = []
+    for entry in manifests:
+        if (
+            not isinstance(entry, Mapping)
+            or not isinstance(entry.get("tag"), str)
+            or not isinstance(entry.get("bottle_sha256"), str)
+            or SHA256.fullmatch(entry["bottle_sha256"]) is None
+        ):
+            raise ValueError("GHCR manifest identity is malformed or duplicated")
+        expected.append({"tag": entry["tag"], "bottle_sha256": entry["bottle_sha256"]})
+    published = _index_records(_fetch_index(token, version), expected)
+    if published != sorted(
+        ({key: str(entry[key]) for key in ("bottle_sha256", "digest", "tag")} for entry in manifests),
+        key=lambda item: item["tag"],
+    ):
+        raise ValueError("public GHCR image index differs from the publication ledger")
     seen = set()
     for entry in manifests:
         if (
@@ -541,7 +649,7 @@ def finalize(*, ledger_path: Path, api: Api) -> None:
         or not str(ledger.get("formula_pr_number", "")).isdigit()
     ):
         raise ValueError("finalization ledger schema is not exact")
-    verify_public_manifests(ledger["ghcr_manifests"])
+    verify_public_manifests(ledger["ghcr_manifests"], str(ledger["source_tag"]).removeprefix("v"))
     pr_number = str(ledger["formula_pr_number"])
     pull = _mapping(
         api.request("GET", f"repos/{REPOSITORY}/pulls/{pr_number}"),
