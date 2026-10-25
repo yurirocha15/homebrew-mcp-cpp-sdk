@@ -67,11 +67,11 @@ class DispatchTests(unittest.TestCase):
             request,
             {
                 "GITHUB_REPOSITORY": "yurirocha15/homebrew-mcp-cpp-sdk",
-                "GITHUB_REF": "refs/tags/release-control-v2",
+                "GITHUB_REF": "refs/tags/release-control-v3",
                 "GITHUB_SHA": CONTROL_SHA,
                 "GITHUB_WORKFLOW_REF": (
                     "yurirocha15/homebrew-mcp-cpp-sdk/.github/workflows/"
-                    "publish-bottles.yml@refs/tags/release-control-v2"
+                    "publish-bottles.yml@refs/tags/release-control-v3"
                 ),
             },
         )
@@ -251,7 +251,7 @@ def contract(control_sha: str = CONTROL_SHA) -> dict[str, object]:
         "provider_controls": {
             "homebrew": {
                 "repository": "yurirocha15/homebrew-mcp-cpp-sdk",
-                "control_tag": "release-control-v2",
+                "control_tag": "release-control-v3",
                 "control_commit": control_sha,
                 "workflow": "publish-bottles.yml",
             },
