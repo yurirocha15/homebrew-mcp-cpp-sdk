@@ -28,7 +28,7 @@ STABLE_CAPABILITIES = [
 ]
 PUBLISHER_REPOSITORY = "yurirocha15/homebrew-mcp-cpp-sdk"
 PUBLISHER_WORKFLOW = "publish-bottles.yml"
-CONTROL_TAG = "release-control-v2"
+CONTROL_TAG = "release-control-v3"
 FORMULA_ASSET = "homebrew-mcp-cpp-sdk.rb"
 CONTRACT_ASSET = "release-publication-contract.json"
 

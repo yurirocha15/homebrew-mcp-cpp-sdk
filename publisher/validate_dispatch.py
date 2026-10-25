@@ -27,7 +27,7 @@ DIGEST = re.compile(r"[0-9a-f]{64}")
 DECIMAL = re.compile(r"[1-9][0-9]*")
 SOURCE_REPOSITORY = "yurirocha15/mcp-cpp-sdk"
 PUBLISHER_REPOSITORY = "yurirocha15/homebrew-mcp-cpp-sdk"
-CONTROL_TAG = "release-control-v2"
+CONTROL_TAG = "release-control-v3"
 WORKFLOW = "publish-bottles.yml"
 
 

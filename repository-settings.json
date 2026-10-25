@@ -15,10 +15,10 @@
         "github_hosted_runners_only": true,
         "require_full_sha": true,
         "allowed_actions": {
-            "actions/checkout": "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
-            "actions/upload-artifact": "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
-            "actions/download-artifact": "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
-            "actions/create-github-app-token": "bcd2ba49218906704ab6c1aa796996da409d3eb1"
+            "actions/checkout": "3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "actions/upload-artifact": "cf430e030ddbb5b0abf93d22962f4752f3646cd9",
+            "actions/download-artifact": "9000827ccba6bdab643e8b6fd33ac0654aef8333",
+            "actions/create-github-app-token": "64ab729a6294000f5aa4a4bc0b73d1f32bc45510"
         },
         "allowed_workflows": {
             "ci.yml": [
@@ -47,7 +47,7 @@
         ]
     },
     "control_tag_ruleset": {
-        "tag": "release-control-v2",
+        "tag": "release-control-v3",
         "enforcement": "active",
         "update_blocked": true,
         "deletion_blocked": true,
@@ -59,7 +59,7 @@
             "required_reviewer_count": 1,
             "prevent_self_review": false,
             "administrator_bypass": false,
-            "deployment_ref": "refs/tags/release-control-v2",
+            "deployment_ref": "refs/tags/release-control-v3",
             "secrets": [
                 "HOMEBREW_APP_PRIVATE_KEY"
             ],
@@ -72,7 +72,7 @@
             "required_reviewer_count": 1,
             "prevent_self_review": false,
             "administrator_bypass": false,
-            "deployment_ref": "refs/tags/release-control-v2",
+            "deployment_ref": "refs/tags/release-control-v3",
             "secrets": [
                 "HOMEBREW_APP_PRIVATE_KEY"
             ],
@@ -106,7 +106,7 @@
             "source_workflow_head_sha",
             "source_workflow_run_id"
         ],
-        "provider_control_ref": "refs/tags/release-control-v2",
+        "provider_control_ref": "refs/tags/release-control-v3",
         "formula_branch": "release/mcp-cpp-sdk-vX.Y.Z",
         "formula_path": "Formula/mcp-cpp-sdk.rb",
         "same_original_run_required": true,

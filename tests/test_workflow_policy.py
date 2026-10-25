@@ -55,9 +55,9 @@ class SecurityPolicyTests(unittest.TestCase):
         verify = job(self.workflow, "verify", "bottle")
         self.assertNotIn("\n    if:", verify)
         self.assertIn("Fail closed unless executing the immutable provider control", verify)
-        self.assertIn('test "${GITHUB_REF}" = refs/tags/release-control-v2', verify)
+        self.assertIn('test "${GITHUB_REF}" = refs/tags/release-control-v3', verify)
         self.assertIn('test "${GITHUB_SHA}" = "${EXPECTED_CONTROL_SHA}"', verify)
-        self.assertIn("@refs/tags/release-control-v2", verify)
+        self.assertIn("@refs/tags/release-control-v3", verify)
         self.assertIn("ref: ${{ inputs.provider_control_sha }}", verify)
 
     def test_source_and_control_identities_are_all_consumed(self) -> None:
@@ -102,7 +102,7 @@ class SecurityPolicyTests(unittest.TestCase):
         environments = self.manifest["environments"]
         self.assertEqual({item["name"] for item in environments}, {"homebrew-publish", "homebrew-finalize"})
         for environment in environments:
-            self.assertEqual(environment["deployment_ref"], "refs/tags/release-control-v2")
+            self.assertEqual(environment["deployment_ref"], "refs/tags/release-control-v3")
             self.assertEqual(environment["required_reviewer_count"], 1)
             self.assertFalse(environment["administrator_bypass"])
 
