@@ -41,7 +41,7 @@ defaults:
 
 jobs:
   verify:
-    name: verify immutable source and provider control
+    name: verify immutable source and dispatched publisher
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     permissions:
@@ -57,15 +57,15 @@ jobs:
       release_manifest_sha256: ${{ steps.input.outputs.release_manifest_sha256 }}
       request_uuid: ${{ steps.input.outputs.request_uuid }}
     steps:
-      - name: Fail closed unless executing the immutable provider control
+      - name: Fail closed unless executing protected main at the dispatched commit
         env:
           EXPECTED_CONTROL_SHA: ${{ inputs.provider_control_sha }}
         run: |
-          test "${GITHUB_REF}" = refs/tags/release-control-v3
+          test "${GITHUB_REF}" = refs/heads/main
           test "${GITHUB_SHA}" = "${EXPECTED_CONTROL_SHA}"
           test "${GITHUB_WORKFLOW_REF}" = \
-            yurirocha15/homebrew-mcp-cpp-sdk/.github/workflows/publish-bottles.yml@refs/tags/release-control-v3
-      - name: Checkout only the immutable provider control
+            yurirocha15/homebrew-mcp-cpp-sdk/.github/workflows/publish-bottles.yml@refs/heads/main
+      - name: Checkout only the dispatched publisher commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.provider_control_sha }}
@@ -101,12 +101,11 @@ jobs:
         run: |
           mkdir release-assets
           gh release download "${SOURCE_TAG}" --repo yurirocha15/mcp-cpp-sdk --dir release-assets
-      - name: Verify signed source bundle and embedded Homebrew control
+      - name: Verify signed source bundle and Homebrew destination
         env:
           SOURCE_TAG: ${{ steps.input.outputs.source_tag }}
           SOURCE_SHA: ${{ steps.input.outputs.source_commit_sha }}
           MANIFEST_SHA256: ${{ steps.input.outputs.release_manifest_sha256 }}
-          PROVIDER_CONTROL_SHA: ${{ steps.input.outputs.provider_control_sha }}
           PUBLISHER_REPOSITORY_ID: ${{ github.repository_id }}
           PRIMARY_FINGERPRINT: ${{ vars.SOURCE_SIGNING_PRIMARY_FINGERPRINT }}
           TAG_FINGERPRINT: ${{ vars.SOURCE_TAG_SIGNING_SUBKEY_FINGERPRINT }}
@@ -118,7 +117,6 @@ jobs:
           --primary-fingerprint "${PRIMARY_FINGERPRINT}"
           --tag-fingerprint "${TAG_FINGERPRINT}"
           --artifact-fingerprint "${ARTIFACT_FINGERPRINT}"
-          --provider-control-sha "${PROVIDER_CONTROL_SHA}"
           --publisher-repository-id "${PUBLISHER_REPOSITORY_ID}"
           --formula-output verified-formula/mcp-cpp-sdk.rb
       - name: Verify signed annotated source tag

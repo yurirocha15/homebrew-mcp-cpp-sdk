@@ -59,22 +59,23 @@ def dispatch() -> dict[str, str]:
     }
 
 
+def main_context() -> dict[str, str]:
+    return {
+        "GITHUB_REPOSITORY": "yurirocha15/homebrew-mcp-cpp-sdk",
+        "GITHUB_REF": "refs/heads/main",
+        "GITHUB_SHA": CONTROL_SHA,
+        "GITHUB_WORKFLOW_REF": (
+            "yurirocha15/homebrew-mcp-cpp-sdk/.github/workflows/"
+            "publish-bottles.yml@refs/heads/main"
+        ),
+    }
+
+
 class DispatchTests(unittest.TestCase):
-    def test_accepts_exact_source_request_and_control_context(self) -> None:
+    def test_accepts_exact_source_request_on_main_at_dispatched_commit(self) -> None:
         request = dispatch()
         self.assertEqual(validate(request), request)
-        validate_execution_context(
-            request,
-            {
-                "GITHUB_REPOSITORY": "yurirocha15/homebrew-mcp-cpp-sdk",
-                "GITHUB_REF": "refs/tags/release-control-v3",
-                "GITHUB_SHA": CONTROL_SHA,
-                "GITHUB_WORKFLOW_REF": (
-                    "yurirocha15/homebrew-mcp-cpp-sdk/.github/workflows/"
-                    "publish-bottles.yml@refs/tags/release-control-v3"
-                ),
-            },
-        )
+        validate_execution_context(request, main_context())
 
     def test_rejects_every_missing_or_extra_field(self) -> None:
         request = dispatch()
@@ -84,20 +85,20 @@ class DispatchTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate({**request, "formula_pr_number": "3"})
 
-    def test_rejects_arbitrary_uuid_and_main_execution(self) -> None:
+    def test_rejects_arbitrary_uuid_and_other_execution_contexts(self) -> None:
         request = dispatch()
         with self.assertRaisesRegex(ValueError, "does not bind"):
             validate({**request, "request_uuid": "00000000-0000-0000-0000-000000000001"})
-        with self.assertRaisesRegex(ValueError, "GITHUB_REF"):
-            validate_execution_context(
-                request,
-                {
-                    "GITHUB_REPOSITORY": "yurirocha15/homebrew-mcp-cpp-sdk",
-                    "GITHUB_REF": "refs/heads/main",
-                    "GITHUB_SHA": CONTROL_SHA,
-                    "GITHUB_WORKFLOW_REF": "ignored",
-                },
-            )
+        workflow = "yurirocha15/homebrew-mcp-cpp-sdk/.github/workflows/publish-bottles.yml"
+        for name, value in (
+            ("GITHUB_REF", "refs/tags/release-control-v3"),
+            ("GITHUB_REF", "refs/heads/feature"),
+            ("GITHUB_SHA", SOURCE_SHA),
+            ("GITHUB_WORKFLOW_REF", f"{workflow}@refs/heads/feature"),
+            ("GITHUB_REPOSITORY", "yurirocha15/other"),
+        ):
+            with self.subTest(name=name, value=value), self.assertRaisesRegex(ValueError, name):
+                validate_execution_context(request, {**main_context(), name: value})
 
 
 class SourceStateTests(unittest.TestCase):
@@ -225,7 +226,7 @@ class SourceStateTests(unittest.TestCase):
             )
 
 
-def contract(control_sha: str = CONTROL_SHA) -> dict[str, object]:
+def contract() -> dict[str, object]:
     return {
         "schema_version": 1,
         "native_targets": [],
@@ -248,16 +249,6 @@ def contract(control_sha: str = CONTROL_SHA) -> dict[str, object]:
             "conan_control": {},
         },
         "conan_requirements": [],
-        "provider_controls": {
-            "homebrew": {
-                "repository": "yurirocha15/homebrew-mcp-cpp-sdk",
-                "control_tag": "release-control-v3",
-                "control_commit": control_sha,
-                "workflow": "publish-bottles.yml",
-            },
-            "chocolatey": {},
-            "conan": {},
-        },
     }
 
 
@@ -272,16 +263,32 @@ FORMULA = '''class McpCppSdk < Formula
 
 
 class SignedPolicyTests(unittest.TestCase):
-    def test_contract_binds_destination_and_executing_control(self) -> None:
-        _verify_publication_contract(
-            contract(), provider_control_sha=CONTROL_SHA, publisher_repository_id="50"
-        )
-        with self.assertRaisesRegex(ValueError, "control"):
+    def test_contract_binds_destination(self) -> None:
+        _verify_publication_contract(contract(), publisher_repository_id="50")
+        with self.assertRaisesRegex(ValueError, "destination"):
+            _verify_publication_contract(contract(), publisher_repository_id="51")
+        with self.assertRaisesRegex(ValueError, "schema"):
             _verify_publication_contract(
-                contract(SOURCE_SHA),
-                provider_control_sha=CONTROL_SHA,
-                publisher_repository_id="50",
+                {**contract(), "unexpected": {}}, publisher_repository_id="50"
             )
+
+    def test_contract_with_former_provider_controls_is_accepted(self) -> None:
+        _verify_publication_contract(
+            {
+                **contract(),
+                "provider_controls": {
+                    "homebrew": {
+                        "repository": "yurirocha15/homebrew-mcp-cpp-sdk",
+                        "control_tag": "release-control-v3",
+                        "control_commit": SOURCE_SHA,
+                        "workflow": "publish-bottles.yml",
+                    },
+                    "chocolatey": {},
+                    "conan": {},
+                },
+            },
+            publisher_repository_id="50",
+        )
 
     def test_formula_requires_static_and_shared_consumers(self) -> None:
         _verify_formula(FORMULA, "v0.2.0")
