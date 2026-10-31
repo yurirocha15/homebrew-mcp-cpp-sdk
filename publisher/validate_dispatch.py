@@ -27,7 +27,7 @@ DIGEST = re.compile(r"[0-9a-f]{64}")
 DECIMAL = re.compile(r"[1-9][0-9]*")
 SOURCE_REPOSITORY = "yurirocha15/mcp-cpp-sdk"
 PUBLISHER_REPOSITORY = "yurirocha15/homebrew-mcp-cpp-sdk"
-CONTROL_TAG = "release-control-v3"
+PUBLISHER_REF = "refs/heads/main"
 WORKFLOW = "publish-bottles.yml"
 
 
@@ -81,20 +81,20 @@ def validate(value: object) -> dict[str, str]:
 
 
 def validate_execution_context(value: dict[str, str], environment: dict[str, str]) -> None:
-    """Bind the request to this repository's immutable control workflow."""
+    """Bind the request to this repository's protected main at the dispatched commit."""
 
     expected = {
         "GITHUB_REPOSITORY": PUBLISHER_REPOSITORY,
-        "GITHUB_REF": f"refs/tags/{CONTROL_TAG}",
+        "GITHUB_REF": PUBLISHER_REF,
         "GITHUB_SHA": value["provider_control_sha"],
         "GITHUB_WORKFLOW_REF": (
             f"{PUBLISHER_REPOSITORY}/.github/workflows/{WORKFLOW}"
-            f"@refs/tags/{CONTROL_TAG}"
+            f"@{PUBLISHER_REF}"
         ),
     }
     for name, expected_value in expected.items():
         if environment.get(name) != expected_value:
-            raise ValueError(f"{name} does not match immutable provider control")
+            raise ValueError(f"{name} does not match the dispatched publisher commit")
 
 
 def main() -> int:

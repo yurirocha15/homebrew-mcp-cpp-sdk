@@ -46,20 +46,13 @@
             "trusted-bottle-policy"
         ]
     },
-    "control_tag_ruleset": {
-        "tag": "release-control-v3",
-        "enforcement": "active",
-        "update_blocked": true,
-        "deletion_blocked": true,
-        "bypass_actors": []
-    },
     "environments": [
         {
             "name": "homebrew-publish",
             "required_reviewer_count": 1,
             "prevent_self_review": false,
             "administrator_bypass": false,
-            "deployment_ref": "refs/tags/release-control-v3",
+            "deployment_ref": "refs/heads/main",
             "secrets": [
                 "HOMEBREW_APP_PRIVATE_KEY"
             ],
@@ -72,7 +65,7 @@
             "required_reviewer_count": 1,
             "prevent_self_review": false,
             "administrator_bypass": false,
-            "deployment_ref": "refs/tags/release-control-v3",
+            "deployment_ref": "refs/heads/main",
             "secrets": [
                 "HOMEBREW_APP_PRIVATE_KEY"
             ],
@@ -106,7 +99,7 @@
             "source_workflow_head_sha",
             "source_workflow_run_id"
         ],
-        "provider_control_ref": "refs/tags/release-control-v3",
+        "provider_control_ref": "refs/heads/main",
         "formula_branch": "release/mcp-cpp-sdk-vX.Y.Z",
         "formula_path": "Formula/mcp-cpp-sdk.rb",
         "same_original_run_required": true,

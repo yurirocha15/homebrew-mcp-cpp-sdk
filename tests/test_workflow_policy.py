@@ -51,13 +51,15 @@ class SecurityPolicyTests(unittest.TestCase):
         for obsolete in ("formula_pr_number", "formula_branch", "formula_head_sha"):
             self.assertNotIn(f"      {obsolete}:\n", header)
 
-    def test_dispatch_executes_only_the_immutable_direct_control_tag(self) -> None:
+    def test_dispatch_executes_only_protected_main_at_the_dispatched_commit(self) -> None:
         verify = job(self.workflow, "verify", "bottle")
         self.assertNotIn("\n    if:", verify)
-        self.assertIn("Fail closed unless executing the immutable provider control", verify)
-        self.assertIn('test "${GITHUB_REF}" = refs/tags/release-control-v3', verify)
+        self.assertIn(
+            "Fail closed unless executing protected main at the dispatched commit", verify
+        )
+        self.assertIn('test "${GITHUB_REF}" = refs/heads/main', verify)
         self.assertIn('test "${GITHUB_SHA}" = "${EXPECTED_CONTROL_SHA}"', verify)
-        self.assertIn("@refs/tags/release-control-v3", verify)
+        self.assertIn("publish-bottles.yml@refs/heads/main", verify)
         self.assertIn("ref: ${{ inputs.provider_control_sha }}", verify)
 
     def test_source_and_control_identities_are_all_consumed(self) -> None:
@@ -66,7 +68,6 @@ class SecurityPolicyTests(unittest.TestCase):
             self.assertIn(f"inputs.{field}", verify)
         self.assertIn("publisher/verify_source_state.py", verify)
         self.assertIn("--source-workflow-head-sha", verify)
-        self.assertIn("--provider-control-sha", verify)
         self.assertIn("--publisher-repository-id", verify)
 
     def test_only_mutation_jobs_receive_environment_secrets(self) -> None:
@@ -98,11 +99,11 @@ class SecurityPolicyTests(unittest.TestCase):
         self.assertNotIn("python3 -I -S -", self.workflow)
         self.assertNotIn("<<'PY'", self.workflow)
 
-    def test_environments_allow_only_the_control_tag(self) -> None:
+    def test_environments_allow_only_main(self) -> None:
         environments = self.manifest["environments"]
         self.assertEqual({item["name"] for item in environments}, {"homebrew-publish", "homebrew-finalize"})
         for environment in environments:
-            self.assertEqual(environment["deployment_ref"], "refs/tags/release-control-v3")
+            self.assertEqual(environment["deployment_ref"], "refs/heads/main")
             self.assertEqual(environment["required_reviewer_count"], 1)
             self.assertFalse(environment["administrator_bypass"])
 

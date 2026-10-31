@@ -1,11 +1,11 @@
 # Homebrew tap bootstrap
 
 This repository is the public `yurirocha15/homebrew-mcp-cpp-sdk` tap. Its
-trusted workflow runs only from an immutable `release-control-v3` release. It
-accepts the source release pipeline's generic signed handoff, verifies the
-source repository, workflow commit, signed tag, immutable release, manifest,
-publication contract, and deterministic request identity, then extracts the
-source-signed formula.
+trusted workflow runs only from protected `main`, at the exact commit the source
+dispatched. It accepts the source release pipeline's generic signed handoff,
+verifies the source repository, workflow commit, signed tag, immutable release,
+manifest, publication contract, and deterministic request identity, then
+extracts the source-signed formula.
 
 Bottle builders consume only that verified formula and receive no publisher
 credential or package-write permission. They build and run both static and
