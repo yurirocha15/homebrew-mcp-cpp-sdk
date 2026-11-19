@@ -1,16 +1,16 @@
 class McpCppSdk < Formula
   desc "Model Context Protocol C++ SDK"
   homepage "https://github.com/yurirocha15/mcp-cpp-sdk"
-  url "https://github.com/yurirocha15/mcp-cpp-sdk/releases/download/v0.2.0/mcp-cpp-sdk-0.2.0.tar.gz"
-  sha256 "f2a7b11e3fbb6ed6e67b649950a4d6d8a766cf71b59fe5bc795c1cdcd38868b4"
-  license "Apache-2.0"
+  url "https://github.com/yurirocha15/mcp-cpp-sdk/releases/download/v0.3.0/mcp-cpp-sdk-0.3.0.tar.gz"
+  sha256 "31ad6f5f63eb1b9101f0ecaac54db10021ecfec0b2fe85740a8172e0cc62dd20"
+  license all_of: ["Apache-2.0", "BSL-1.0"]
 
   bottle do
     root_url "https://ghcr.io/v2/yurirocha15/mcp-cpp-sdk"
-    sha256 cellar: :any, arm64_sequoia: "38cb64ee98d4d57f94622c58297b8e502f61f1e2adefd6cc99129323de58813a"
-    sha256 cellar: :any, sequoia:       "3bfb9fb9008159b88cce87cbe8f405a98b15c33b04527473feb8965796699f25"
-    sha256 cellar: :any, arm64_linux:   "56446517c84795ed8674465aba67a8fc6e465f1f787b763babb802fc7e29f679"
-    sha256 cellar: :any, x86_64_linux:  "4420522d761cc9c00fd7dbc27d00672452f0ac27aa02e564622f50f6074fd060"
+    sha256 cellar: :any, arm64_sequoia: "9e49321d2aa1f29ddcaa82714faf6cc292cf65413035d323aacb2716b2e0dfe7"
+    sha256 cellar: :any, sequoia:       "aca31bfa6e21b4b176f94088cc8222da3a70f75469dbe2350ef7dcc8ee335113"
+    sha256 cellar: :any, arm64_linux:   "6e0ade67e8f5d68cd5242ee3030745f27f94a79be12399b4fb011b8dcf7177d6"
+    sha256 cellar: :any, x86_64_linux:  "eec8c660b4d4c68b6e48911f6fce442256dc7d384162b4d9a776c38c66b8de3c"
   end
 
   depends_on "cmake" => :build
